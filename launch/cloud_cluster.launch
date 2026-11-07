@@ -1,0 +1,13 @@
+<launch>
+    <arg name="tol" default="0.06"/>
+    <arg name="min_cluster_size" default="10"/>
+    <arg name="marker_lifetime" default="2.0"/>
+    <node pkg="radar_learning" 
+    type="cloud_cluster"
+    name="radar_cluster"
+    output="screen">
+    <param name="tol" type="double" value= "$(arg tol)"/>
+    <param name="min_cluster_size" type="int" value="$(arg min_cluster_size)" />
+    <param name="marker_lifetime" type="double" value="$(arg marker_lifetime)" />
+    </node>
+</launch>

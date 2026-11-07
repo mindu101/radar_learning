@@ -1,0 +1,21 @@
+<launch>
+    <arg name="leaf_size" default="0.1" />
+    <arg name="axis" default="z"/>
+    <arg name="min" default="0.1"/>
+    <arg name="max" default="2.0"/>
+    <node pkg="radar_learning"
+    type="cloud_crop"
+    name="radar_crop"
+    output="screen">
+        <param name="axis" type="str"
+        value="$(arg axis)"/>
+        <param name="min" type="double"
+        value="$(arg min)"/>
+        <param name="max" type="double"
+        value="$(arg max)"/>
+    </node>
+    <node pkg="radar_learning" type="cloud_voxel" name="radar_voxel" output="screen">
+        <param name="leaf_size"
+        type="double" value ="$(arg leaf_size)"/>
+    </node>
+</launch>
