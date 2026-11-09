@@ -34,19 +34,32 @@ struct Candidate
 struct Track
 {
     int id;
-    pcl::PointXYZ position;
+    pcl::PointXYZ position;//当前状态位置，实际的，滤波后的结果
+    pcl::PointXYZ prediction;//预测位置，滤波前预测
+    pcl::PointXYZ measurement;//最近一次的候选位置
+    double vx;
+    double vy;
+    double vz;
     double dx;
     double dy;
     double dz;
     int missed_frames;
     int age_frames;
+    ros::Time state_stamp;//this time;
+    ros::Time last_seen;// former time
 };
+
 
 std::vector<Track> tracks;
 int next_track_id=0;
 double association_distance;
 int max_missed_frames;
-
+double filter_alpha;
+double filter_beta;
+double lost_timeout;//目标丢失多少秒后删除
+double max_predict_gap;//每一帧间隔多大后重置滤波器
+ros::Time previous_frame_stamp;
+std::string tracking_frame;
 
 
 void publishTrackMarker(const Track& track, const sensor_msgs::PointCloud2 & source, uint8_t action)
@@ -71,103 +84,232 @@ void publishTrackMarker(const Track& track, const sensor_msgs::PointCloud2 & sou
     marker.scale.x = std::max(track.dx, 0.02);
     marker.scale.y = std::max(track.dy, 0.02);
     marker.scale.z = std::max(track.dz, 0.02);
-    marker.color.r = 0.1;
-    marker.color.g = 0.4;
-    marker.color.b = 1.0;
+    const bool predict = track.missed_frames>0;
+    marker.color.r = predict?1.0:0.1;
+    marker.color.g = predict?0.5:0.4;
+    marker.color.b = predict?0.0:1.0;
     marker.color.a = 0.35;
-    marker.lifetime = ros::Duration(0.0);
+    marker.lifetime = ros::Duration(marker_lifetime);
     cent_pub.publish(marker);
 }
 
-void updateTracks(const std::vector<Candidate> & candidates, const sensor_msgs::PointCloud2 &source )
-{
-    const double limit2 = association_distance * association_distance;
-    std::vector<bool> used(candidates.size(), false);
+// void updateTracks(const std::vector<Candidate> & candidates, const sensor_msgs::PointCloud2 &source )
+// {
+//     const double limit2 = association_distance * association_distance;
+//     std::vector<bool> used(candidates.size(), false);
 
-    for (auto& track : tracks)
-    {
-        int best_index = -1;
-        double best_distance = limit2;
-        for (std::size_t i =0;i<candidates.size();i++)
-        {
-            if(used[i]==true)continue;
+//     for (auto& track : tracks)
+//     {
+//         int best_index = -1;
+//         double best_distance = limit2;
+//         for (std::size_t i =0;i<candidates.size();i++)
+//         {
+//             if(used[i]==true)continue;
             
-            const double dx= static_cast<double>(track.position.x) - candidates[i].position.x;
-            const double dy= static_cast<double>(track.position.y) - candidates[i].position.y;
-            const double dz= static_cast<double>(track.position.z) - candidates[i].position.z;
-            const double distance =dx*dx +dy*dy + dz*dz;
-            if(distance<=best_distance)
-            {
-                best_distance=distance;
-                best_index  =static_cast<int>(i);
-            } 
+//             const double dx= static_cast<double>(track.position.x) - candidates[i].position.x;
+//             const double dy= static_cast<double>(track.position.y) - candidates[i].position.y;
+//             const double dz= static_cast<double>(track.position.z) - candidates[i].position.z;
+//             const double distance =dx*dx +dy*dy + dz*dz;
+//             if(distance<=best_distance)
+//             {
+//                 best_distance=distance;
+//                 best_index  =static_cast<int>(i);
+//             } 
 
-        }
-        if(best_index>=0)
-        {
-            const Candidate& candidate = candidates[best_index];
-            track.position = candidate.position;
-            track.dx = candidate.dx;
-            track.dy = candidate.dy;
-            track.dz = candidate.dz;
-            track.missed_frames=0;
-            ++track.age_frames;
-            used[best_index]=1;
-        }
-        else
-        {
-            ++track.missed_frames;
-        }
-    }
+//         }
+//         if(best_index>=0)
+//         {
+//             const Candidate& candidate = candidates[best_index];
+//             track.position = candidate.position;
+//             track.dx = candidate.dx;
+//             track.dy = candidate.dy;
+//             track.dz = candidate.dz;
+//             track.missed_frames=0;
+//             ++track.age_frames;
+//             used[best_index]=1;
+//         }
+//         else
+//         {
+//             ++track.missed_frames;
+//         }
+//     }
     
 
 
-    std::vector<int> remove_ids;
-    tracks.erase(std::remove_if(
-        tracks.begin(), 
-        tracks.end(),
-        [&remove_ids](const Track& track ){
+//     std::vector<int> remove_ids;
+//     tracks.erase(std::remove_if(
+//         tracks.begin(), 
+//         tracks.end(),
+//         [&remove_ids](const Track& track ){
+//         if (track.missed_frames>max_missed_frames)
+//         {
+//             remove_ids.push_back(track.id);
+//             return true;
+//         }
+//         return false;
+//     }),
+//     tracks.end());
+
+//     for (int id : remove_ids)
+//     {
+//         Track removed{};
+//         removed.id = id;
+//         publishTrackMarker(removed, source, visualization_msgs::Marker::DELETE);
+//     }
+
+//     for(std::size_t i=0; i< candidates.size(); i++)
+//     {
+//         if(used[i])
+//         {
+//             continue;
+//         }
+//         const Candidate& candidate = candidates[i];
+//         tracks.push_back(
+//             Track{
+//                 next_track_id++,
+//                 candidate.position,
+//                 candidate.dx,
+//                 candidate.dy,
+//                 candidate.dz,
+//                 0,1}
+//         );
+//     }
+
+//     for (const auto& track : tracks)
+//     {
+//         publishTrackMarker(track, source, visualization_msgs::Marker::ADD);
+
+//     }
+
+// }
+
+void updateTracks(const std::vector<Candidate> & candidates, const sensor_msgs::PointCloud2 & source)
+{
+    const ros::Time stamp = source.header.stamp;
+    if(stamp.is_zero())
+    {
+        ROS_WARN_THROTTLE(1.0,"stamp");
+        return ;
+    }
+
+    if(!previous_frame_stamp.is_zero())
+    {
+        const double frame_dt=(stamp - previous_frame_stamp).toSec();
+
+        if(frame_dt<0.001)
+        {
+             ROS_WARN_THROTTLE(1.0,"dt is lower than 0.001");
+            return ;
+        }
+        if(source.header.frame_id!=tracking_frame||frame_dt>max_predict_gap){
+            ROS_WARN_THROTTLE(1.0,"axis is wrong or break in radar");
+            // return ;
+        }
+
+    }
+    previous_frame_stamp = stamp;
+    tracking_frame= source.header.frame_id;
+    tracks.erase(std::remove_if(tracks.begin(), tracks.end(), 
+    [&](const Track & track){if((stamp-track.last_seen).toSec()> lost_timeout){publishTrackMarker(track , source, visualization_msgs::Marker::DELETE);
+        return true;}
+        return false;}), tracks.end());
+
+    const double limit = association_distance*association_distance;
+
+    std::vector<bool> used(candidates.size(),false);
+
+    for (auto& track: tracks)
+        {
+            const double dt = (stamp-track.state_stamp).toSec();
+            const double px = track.position.x + track.vx * dt;
+            const double py = track.position.y + track.vy * dt;
+            const double pz = track.position.z + track.vz * dt;
+            track.prediction = pcl::PointXYZ(px, py, pz);
+            track.position = track.prediction;
+
+            int best_index = -1;
+            double best_distance = limit;
+            for(std::size_t i=0; i<candidates.size(); ++i)
+            {
+                if(used[i])continue;
+
+                const double ex = candidates[i].position.x - px;
+                const double ey = candidates[i].position.y - py;
+                const double ez = candidates[i].position.z - pz;
+                const double distance = ex*ex + ey*ey +ez*ez;
+
+                if(distance <= best_distance)
+                {
+                    best_distance= distance;
+                    best_index = static_cast<int>(i);
+                }
+            }
+
+            if(best_index>=0)
+            {
+                const Candidate & candidate = candidates[best_index];
+                const double rx = candidate.position.x - px;
+                const double ry = candidate.position.y - py;
+                const double rz = candidate.position.z - pz;
+
+                track.position = pcl::PointXYZ(px + filter_alpha* rx, py + filter_alpha * ry, pz + filter_alpha * rz);
+                track.vx += filter_beta * rx/dt;
+                track.vy += filter_beta * ry/dt;
+                track.vz += filter_beta * rz/dt;
+                track.measurement = candidate.position;
+                track.dx = candidate.dx;
+                track.dy = candidate.dy;
+                track.dz = candidate.dz;
+                track.last_seen = stamp;
+                track.missed_frames =0;
+                ++track.age_frames;
+                used[best_index]=true;
+            }else
+            {
+                ++track.missed_frames;
+            }
+            track.state_stamp=stamp;
+        }
+    tracks.erase(std::remove_if(tracks.begin(), tracks.end(),
+    [&](const Track & track)
+    {
         if (track.missed_frames>max_missed_frames)
         {
-            remove_ids.push_back(track.id);
+            publishTrackMarker(track,source, visualization_msgs::Marker::DELETE);
             return true;
         }
         return false;
-    }),
-    tracks.end());
+    }), tracks.end());
 
-    for (int id : remove_ids)
+    for(std::size_t i=0; i<candidates.size();i++)
     {
-        Track removed{};
-        removed.id = id;
-        publishTrackMarker(removed, source, visualization_msgs::Marker::DELETE);
-    }
+        if(used[i])continue;
 
-    for(std::size_t i=0; i< candidates.size(); i++)
-    {
-        if(used[i])
-        {
-            continue;
-        }
         const Candidate& candidate = candidates[i];
-        tracks.push_back(
-            Track{
-                next_track_id++,
-                candidate.position,
-                candidate.dx,
-                candidate.dy,
-                candidate.dz,
-                0,1}
-        );
+        Track track{};
+        track.id = next_track_id++;
+        track.position = candidate.position;
+        track.prediction = candidate.position;
+        track.measurement = candidate.position;
+        track.vx  =  track.vy =track.vz=0.0;
+        track.dx = candidate.dx;
+        track.dy = candidate.dy;
+        track.dz = candidate.dz;
+        track.missed_frames=0;
+        track.age_frames=1;
+        track.state_stamp=stamp;
+        track.last_seen=stamp;
+        tracks.push_back(track);
     }
-
-    for (const auto& track : tracks)
+    for(const auto & track: tracks)
     {
         publishTrackMarker(track, source, visualization_msgs::Marker::ADD);
-
     }
-
 }
+
+
+
+
 void cloudCallback(const sensor_msgs::PointCloud2::ConstPtr& msg)
 {
     std::vector<Candidate> candidates;
@@ -180,10 +322,12 @@ void cloudCallback(const sensor_msgs::PointCloud2::ConstPtr& msg)
         return ;
     }
     std::vector<int> valid_index;
+    input->is_dense = false;
     pcl::removeNaNFromPointCloud(*input, *input, valid_index);
     const ros::WallTime t1 = ros::WallTime::now();
     if (input->empty())
     {
+        updateTracks({}, *msg);
         ROS_INFO_THROTTLE(1.0, "points=0 clusters=0 total=%.1f ms",
                           (t1 - t0).toSec() * 1000.0);
         return;
@@ -265,26 +409,26 @@ void cloudCallback(const sensor_msgs::PointCloud2::ConstPtr& msg)
         {
             ++reject_count;
         }
-        // visualization_msgs::Marker marker;
-        // marker.header = msg->header;
-        // marker.ns = "largest_cluster";
-        // marker.id = mark_id++;
-        // marker.type = visualization_msgs::Marker::CUBE;
-        // marker.action = visualization_msgs::Marker::ADD;
+        visualization_msgs::Marker marker;
+        marker.header = msg->header;
+        marker.ns = "largest_cluster";
+        marker.id = mark_id++;
+        marker.type = visualization_msgs::Marker::CUBE;
+        marker.action = visualization_msgs::Marker::ADD;
 
-        // marker.pose.position.x = (xmin + xmax) / 2.0;
-        // marker.pose.position.y = (ymin + ymax) / 2.0;
-        // marker.pose.position.z = (zmin + zmax) / 2.0;
-        // marker.pose.orientation.w = 1.0;
-        // marker.scale.x = std::max(xmax - xmin, 0.02f);
-        // marker.scale.y = std::max(ymax - ymin, 0.02f);
-        // marker.scale.z = std::max(zmax - zmin, 0.02f);
-        // marker.color.r = accepted ? 0.0 : 1.0;
-        // marker.color.g = accepted ? 1.0 : 0.0;
-        // marker.color.b = 0.0;
-        // marker.color.a = 0.25;
-        // marker.lifetime = ros::Duration(marker_lifetime);
-        // cent_pub.publish(marker);
+        marker.pose.position.x = (xmin + xmax) / 2.0;
+        marker.pose.position.y = (ymin + ymax) / 2.0;
+        marker.pose.position.z = (zmin + zmax) / 2.0;
+        marker.pose.orientation.w = 1.0;
+        marker.scale.x = std::max(xmax - xmin, 0.02f);
+        marker.scale.y = std::max(ymax - ymin, 0.02f);
+        marker.scale.z = std::max(zmax - zmin, 0.02f);
+        marker.color.r = accepted ? 0.0 : 1.0;
+        marker.color.g = accepted ? 1.0 : 0.0;
+        marker.color.b = 0.0;
+        marker.color.a = 0.25;
+        marker.lifetime = ros::Duration(marker_lifetime);
+        cent_pub.publish(marker);
         ROS_INFO_THROTTLE(1.0, "center: %.2f, %.2f, %.2f",
                           center[0], center[1], center[2]);
     }
@@ -316,6 +460,11 @@ int main(int argc, char ** argv)
     pnh.param<double>("max_dz", max_dz, 4.0);
     pnh.param<double>("association_distance", association_distance, 0.5);
     pnh.param<int>("max_missed_frames",max_missed_frames, 4);
+    pnh.param<double>("filter_alpha", filter_alpha, 0.60);
+    pnh.param<double>("filter_beta", filter_beta, 0.15);
+    pnh.param<double>("lost_timeout", lost_timeout, 0.6);
+    pnh.param<double>("max_predict_gap", max_predict_gap, 1.0);
+    
     const auto valid_range = [] (double lower, double upper)
     {
         return std::isfinite(lower)&&std::isfinite(upper)&&lower>=0.0&&upper>=lower;
